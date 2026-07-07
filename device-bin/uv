@@ -1,0 +1,5 @@
+#!/bin/sh
+export HOME=/data/A9
+export UV_CACHE_DIR=/data/A9/.cache/uv
+export PATH=/data/A9/bin:/data/A9/uv/uv-armv7-unknown-linux-musleabihf:$PATH
+exec /data/A9/uv/uv-armv7-unknown-linux-musleabihf/uv "$@"

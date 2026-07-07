@@ -1,0 +1,7 @@
+#!/bin/sh
+export PYTHONHOME=/data/A9/python-portable/usr
+export LD_LIBRARY_PATH=/data/A9/python-portable/lib:/data/A9/python-portable/usr/lib:/system/lib:$LD_LIBRARY_PATH
+export SSL_CERT_FILE=/data/A9/certs/cacert.pem
+exec /data/A9/python-portable/lib/ld-musl-armhf.so.1 \
+  --library-path /data/A9/python-portable/lib:/data/A9/python-portable/usr/lib:/system/lib \
+  /data/A9/python-portable/usr/bin/python3.14 "$@"
