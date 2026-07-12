@@ -21,3 +21,8 @@ tmp.json
 # Environment / secrets
 .deepseek_env
 .env
+# Smart home runtime files
+*.db
+*.mp3
+tts_cache/
+__pycache__/

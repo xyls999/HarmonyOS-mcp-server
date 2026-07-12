@@ -1,0 +1,30 @@
+{
+  "living_room": {
+    "name": "living-room-hi3861",
+    "ip": "192.168.1.62",
+    "port": 8000
+  },
+  "kitchen": {
+    "name": "kitchen-h3863",
+    "ip": "192.168.1.23",
+    "port": 8000,
+    "alarm_udp_port": 8001,
+    "light_command_inverted": false
+  },
+  "bathroom": {
+    "name": "bathroom-h3863",
+    "ip": "192.168.1.63",
+    "port": 8000,
+    "light_command_inverted": false
+  },
+  "bedroom": {
+    "name": "bedroom-h3863",
+    "ip": "192.168.1.64",
+    "port": 8000,
+    "light_command_inverted": false
+  },
+  "defaults": {
+    "timeout_seconds": 3.0,
+    "monitor_interval_seconds": 1.0
+  }
+}
