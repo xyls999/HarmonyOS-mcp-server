@@ -61,6 +61,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rag.rag_service import SimpleRAG
 _rag = SimpleRAG()
 
+# 安全护栏
+from safety_shield import shield as _shield
+
 # 硬件控制桥接
 try:
     from hardware_bridge import (
@@ -171,6 +174,43 @@ def db_init():
 
 def _db():
     return sqlite3.connect(str(DB_PATH))
+
+# ===== 安全护栏日志 =====
+def _log_security(result, input_text, source="chat"):
+    """记录安全事件到数据库"""
+    try:
+        conn = _db()
+        conn.execute("""CREATE TABLE IF NOT EXISTS security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id TEXT NOT NULL, severity TEXT NOT NULL,
+            category TEXT NOT NULL, input_text TEXT NOT NULL,
+            matched_text TEXT NOT NULL, reason TEXT NOT NULL,
+            source TEXT DEFAULT 'chat', blocked INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now')))""")
+        conn.execute("""CREATE INDEX IF NOT EXISTS idx_security_severity ON security_events(severity)""")
+        conn.execute("""CREATE INDEX IF NOT EXISTS idx_security_time ON security_events(created_at)""")
+        conn.execute("""CREATE INDEX IF NOT EXISTS idx_security_rule ON security_events(rule_id)""")
+        conn.execute("INSERT INTO security_events(rule_id,severity,category,input_text,matched_text,reason,source,blocked) VALUES(?,?,?,?,?,?,?,?)",
+                     (result.rule_id, result.severity, result.category,
+                      input_text[:500], result.matched_text[:200], result.reason, source, 1 if result.blocked else 0))
+        conn.commit(); conn.close()
+        log(f"[SHIELD] BLOCKED rule={result.rule_id} sev={result.severity} matched={result.matched_text[:50]}")
+    except Exception as e:
+        log(f"[SHIELD] log error: {e}")
+
+def _security_block_reply(result):
+    """生成安全拦截的标准回复"""
+    _tts_speak(f"检测到非安全指令，已阻止。具体指令：{result.matched_text}")
+    return {
+        "reply": f"\u26a0\ufe0f 检测到非安全指令，已阻止\n类别：{result.category}\n原因：{result.reason}\n具体指令：\"{result.matched_text}\"",
+        "role": "assistant",
+        "source": "security_block",
+        "voiceSequence": [_vs_entry(f"检测到非安全指令，已阻止。具体指令：{result.matched_text}")],
+        "securityBlocked": True,
+        "securityRule": result.rule_id,
+        "securitySeverity": result.severity
+    }
+
 
 # ===== 真实硬件轮询 =====
 def _poll_living():
@@ -665,6 +705,10 @@ class H(BaseHTTPRequestHandler):
                 self._j(200, _rag.get_stats())
             elif p == "/api/stats":
                 self._j(200, self._get_stats())
+            elif p == "/api/security/events":
+                self._j(200, self._security_events())
+            elif p == "/api/security/stats":
+                self._j(200, self._security_stats())
             # TTS语音输出代理
             elif p == "/api/tts/config":
                 self._proxy_get("http://127.0.0.1:8081/tts/config")
@@ -1093,6 +1137,21 @@ class H(BaseHTTPRequestHandler):
     # ===== 设备控制 =====
     def _toggle_device(self, device_id, body):
         is_on = bool(body.get("isOn", False))
+        # 安全护栏: 设备操作频率检查
+        _dev_rate = _shield.check_device_rate(device_id, "device_toggle")
+        if _dev_rate.blocked:
+            _log_security(_dev_rate, f"toggle {device_id}", source="api")
+            return {"success": False, "device": {"id": device_id, "online": False},
+                    "securityBlocked": True, "securityRule": _dev_rate.rule_id,
+                    "securitySeverity": _dev_rate.severity, "message": _dev_rate.reason}
+        # 安全护栏: 警报频率检查
+        if device_id == "alarm_01":
+            _ar = _shield.check_alarm_rate()
+            if _ar.blocked:
+                _log_security(_ar, f"alarm trigger {device_id}", source="api")
+                return {"success": False, "device": {"id": device_id, "online": False},
+                        "securityBlocked": True, "securityRule": _ar.rule_id,
+                        "securitySeverity": _ar.severity, "message": _ar.reason}
         hw_result = hw_toggle(device_id, is_on)
         hw_ok = hw_result["success"]
         dev_name = _DEVICE_NAMES.get(device_id, device_id)
@@ -1168,6 +1227,14 @@ class H(BaseHTTPRequestHandler):
 
     def _door_control(self, body):
         action = body.get("action", "query")
+        # 安全护栏: 门禁频率检查
+        if action == "open":
+            _dr = _shield.check_door_rate()
+            if _dr.blocked:
+                _log_security(_dr, f"door open action", source="api")
+                return {"success": False, "state": "blocked", "hardwareOnline": False,
+                        "securityBlocked": True, "securityRule": _dr.rule_id, "securitySeverity": _dr.severity,
+                        "message": _dr.reason}
         if action == "open":
             hw_result = hw_toggle("door_01", True)
         elif action == "close":
@@ -1191,12 +1258,73 @@ class H(BaseHTTPRequestHandler):
         conn.commit(); conn.close()
         return {"id": r[0], "nickname": r[1], "homeName": r[2], "memberCount": r[3]}
 
+
+    # ===== 安全护栏 API =====
+    def _security_events(self):
+        severity = ""; limit = 50
+        qs = self.path.split("?", 1)
+        if len(qs) > 1:
+            for kv in qs[1].split("&"):
+                k, v = kv.split("=", 1) if "=" in kv else (kv, "")
+                if k == "severity": severity = v
+                if k == "limit": limit = int(v)
+        conn = _db()
+        conn.execute("""CREATE TABLE IF NOT EXISTS security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id TEXT NOT NULL, severity TEXT NOT NULL,
+            category TEXT NOT NULL, input_text TEXT NOT NULL,
+            matched_text TEXT NOT NULL, reason TEXT NOT NULL,
+            source TEXT DEFAULT 'chat', blocked INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now')))""")
+        if severity:
+            rows = conn.execute("SELECT id,rule_id,severity,category,input_text,matched_text,reason,source,blocked,created_at FROM security_events WHERE severity=? ORDER BY created_at DESC LIMIT ?", (severity, limit)).fetchall()
+        else:
+            rows = conn.execute("SELECT id,rule_id,severity,category,input_text,matched_text,reason,source,blocked,created_at FROM security_events ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        conn.close()
+        events = []
+        for r in rows:
+            events.append({"id": r[0], "ruleId": r[1], "severity": r[2], "category": r[3],
+                          "inputText": r[4], "matchedText": r[5], "reason": r[6],
+                          "source": r[7], "blocked": bool(r[8]), "timestamp": r[9]})
+        return {"total": len(events), "events": events, "shieldInfo": _shield.get_stats()}
+
+    def _security_stats(self):
+        conn = _db()
+        conn.execute("""CREATE TABLE IF NOT EXISTS security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id TEXT NOT NULL, severity TEXT NOT NULL,
+            category TEXT NOT NULL, input_text TEXT NOT NULL,
+            matched_text TEXT NOT NULL, reason TEXT NOT NULL,
+            source TEXT DEFAULT 'chat', blocked INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now')))""")
+        today = datetime.now().strftime("%Y-%m-%d")
+        total_today = conn.execute("SELECT COUNT(*) FROM security_events WHERE created_at >= ?", (today,)).fetchone()[0]
+        by_severity = {}
+        for sev in ("Critical", "High", "Medium", "Low"):
+            by_severity[sev] = conn.execute("SELECT COUNT(*) FROM security_events WHERE severity=? AND created_at >= ?", (sev, today)).fetchone()[0]
+        by_category = {}
+        for row in conn.execute("SELECT category, COUNT(*) as cnt FROM security_events WHERE created_at >= ? GROUP BY category", (today,)):
+            by_category[row[0]] = row[1]
+        by_rule = {}
+        for row in conn.execute("SELECT rule_id, COUNT(*) as cnt FROM security_events WHERE created_at >= ? GROUP BY rule_id ORDER BY cnt DESC LIMIT 10", (today,)):
+            by_rule[row[0]] = row[1]
+        total_all = conn.execute("SELECT COUNT(*) FROM security_events").fetchone()[0]
+        conn.close()
+        return {"today": total_today, "total": total_all, "bySeverity": by_severity,
+                "byCategory": by_category, "byRule": by_rule, "shieldInfo": _shield.get_stats()}
+
     # ===== AI 对话 =====
     def _chat(self, body):
         msgs = body.get("messages", [])
         if not msgs:
             return {"reply": "请输入消息", "role": "assistant"}
         last_msg = msgs[-1].get("content", "")
+
+        # 0. 安全护栏检查
+        _sr = _shield.check(last_msg, context="chat")
+        if _sr.blocked:
+            _log_security(_sr, last_msg, source="chat")
+            return _security_block_reply(_sr)
 
         # 1. 设备控制意图
         _dev_ctrl = self._detect_device_control(last_msg)
@@ -1329,6 +1457,11 @@ class H(BaseHTTPRequestHandler):
         text = body.get("text", "")
         if not text:
             return {"reply": "未收到语音内容", "role": "assistant"}
+        # 安全护栏检查语音输入
+        _sr = _shield.check(text, context="voice")
+        if _sr.blocked:
+            _log_security(_sr, text, source="voice")
+            return _security_block_reply(_sr)
         return self._chat({"messages": [{"role": "user", "content": text}]})
 
 

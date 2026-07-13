@@ -63,6 +63,9 @@ from urllib.request import Request, urlopen
 # 硬件控制桥接
 from hardware_bridge import hw_toggle, hw_control, hw_scene_execute
 
+# 安全护栏
+from safety_shield import shield as _shield
+
 
 
 # ===== 配置 =====
@@ -1960,89 +1963,122 @@ def execute_command(cmd):
 
             content = cmd.get("content", "")
 
-            # 保存用户消息
-
-            conn.execute("INSERT INTO chat_history(user_id,role,content,scene_id) VALUES('u001','user',?,?)", (content, None))
-
-            # RAG 场景匹配
-
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-            from rag.rag_service import SimpleRAG
-
-            from scenes.scene_config import get_scene_id_by_name, SCENE_META
-
-            rag = SimpleRAG()
-
-            scene_match = rag.search_scene(content)
-
-            reply = ""
-
-            scene_id = None
-
-            if scene_match and scene_match.get("scene_id"):
-
-                sid = scene_match["scene_id"]
-
-                # 激活场景
-
-                conn.execute("UPDATE scenes SET is_active=0")
-
-                conn.execute("UPDATE scenes SET is_active=1, updated_at=datetime('now') WHERE id=?", (sid,))
-
-                actions = conn.execute("SELECT device_id,is_on,primary_value FROM scene_actions WHERE scene_id=? ORDER BY sort_order", (sid,)).fetchall()
-
-                for dev_id, is_on, pv in actions:
-
-                    conn.execute("UPDATE devices SET is_on=?, updated_at=datetime('now') WHERE id=?", (1 if is_on else 0, dev_id))
-
-                    if pv is not None:
-
-                        conn.execute("UPDATE devices SET primary_value=?, updated_at=datetime('now') WHERE id=?", (pv, dev_id))
-
-                    conn.execute("INSERT INTO device_operations(device_id,action,params_json,source,scene_id) VALUES(?,?,?,?,?)",
-
-                                (dev_id, "scene_toggle", json.dumps({"isOn": bool(is_on), "primaryValue": pv}), "remote", sid))
-
-                # ★ 调用真实硬件执行场景
-                hw_chat_results = hw_scene_execute([(dev_id, is_on, pv) for dev_id, is_on, pv in actions])
-                hw_chat_fail = sum(1 for hr in hw_chat_results if not hr["success"])
-                hw_chat_ok = any(hr["success"] for hr in hw_chat_results)
-
-                sname = SCENE_META.get(sid, {}).get("name", sid)
-                if hw_chat_fail == 0:
-                    reply = f"已切换到「{sname}」模式，控制 {len(actions)} 台设备"
-                elif hw_chat_ok:
-                    reply = f"已切换到「{sname}」模式，{hw_chat_fail}台设备调用失败"
-                else:
-                    reply = f"「{sname}」模式调用失败"
-
-                scene_id = sid
-
-            else:
-                # call gateway /api/chat/send for unified processing
+            # ===== 安全护栏检查 =====
+            _sr = _shield.check(content, context="ws_chat")
+            if _sr.blocked:
                 try:
-                    _gw_body = json.dumps({"messages": [{"role": "user", "content": content}]}, ensure_ascii=False).encode()
-                    _gw_req = Request("http://127.0.0.1:8080/api/chat/send", data=_gw_body,
-                                     headers={"Content-Type": "application/json"}, method="POST")
-                    with urlopen(_gw_req, timeout=30) as _gw_r:
-                        _gw_resp = json.loads(_gw_r.read().decode())
-                    _gw_data = _gw_resp.get("data", _gw_resp)
-                    reply = _gw_data.get("reply", "gateway no response")
-                    hw_online = _gw_data.get("hardwareOnline", True)
-                    _vs_seq = _gw_data.get("voiceSequence", [])
-                    scene_id = _gw_data.get("sceneId", None)
-                    log(f"[CHAT-GW] gateway ok: {reply[:40]}...")
-                except Exception as _e:
-                    reply = f"gateway call failed: {_e}"
-                    hw_online = False
-                    _vs_seq = []
-                    log(f"[CHAT-GW] failed: {_e}")
-                conn.execute("INSERT INTO chat_history(user_id,role,content,scene_id) VALUES(?,?,?,?)", ("u001","assistant",reply, scene_id))
-                conn.commit()
-            chat_msg = "" if hw_online else "device call failed"
-            result = {"msgId": msg_id, "success": True, "data": {"reply": reply, "sceneId": scene_id, "voiceSequence": _vs_seq},
-                     "hardwareOnline": hw_online, "message": chat_msg}
+                    conn.execute("""CREATE TABLE IF NOT EXISTS security_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        rule_id TEXT NOT NULL, severity TEXT NOT NULL,
+                        category TEXT NOT NULL, input_text TEXT NOT NULL,
+                        matched_text TEXT NOT NULL, reason TEXT NOT NULL,
+                        source TEXT DEFAULT 'chat', blocked INTEGER DEFAULT 1,
+                        created_at TEXT DEFAULT (datetime('now')))""")
+                    conn.execute("INSERT INTO security_events(rule_id,severity,category,input_text,matched_text,reason,source,blocked) VALUES(?,?,?,?,?,?,?,?)",
+                                 (_sr.rule_id, _sr.severity, _sr.category,
+                                  content[:500], _sr.matched_text[:200], _sr.reason, "ws_chat", 1))
+                    conn.commit()
+                except Exception:
+                    pass
+                try:
+                    tts_speak(f"\u68c0\u6d4b\u5230\u975e\u5b89\u5168\u6307\u4ee4\uff0c\u5df2\u963b\u6b62\u3002\u5177\u4f53\u6307\u4ee4\uff1a{_sr.matched_text}")
+                except Exception:
+                    pass
+                _vs_h = hashlib.md5(f"\u68c0\u6d4b\u5230\u975e\u5b89\u5168\u6307\u4ee4\u5df2\u963b\u6b62{_sr.matched_text}_7".encode()).hexdigest()
+                _vs_sec_entry = {"text": f"\u68c0\u6d4b\u5230\u975e\u5b89\u5168\u6307\u4ee4\uff0c\u5df2\u963b\u6b62\u3002\u5177\u4f53\u6307\u4ee4\uff1a{_sr.matched_text}",
+                              "audioUrl": f"/api/tts/audio/{_vs_h}.mp3"}
+                log(f"[SHIELD] BLOCKED ws_chat rule={_sr.rule_id} matched={_sr.matched_text[:50]}")
+                result = {"msgId": msg_id, "success": True,
+                          "data": {"reply": f"\u26a0\ufe0f \u68c0\u6d4b\u5230\u975e\u5b89\u5168\u6307\u4ee4\uff0c\u5df2\u963b\u6b62\n\u7c7b\u522b\uff1a{_sr.category}\n\u539f\u56e0\uff1a{_sr.reason}\n\u5177\u4f53\u6307\u4ee4\uff1a\"{_sr.matched_text}\"",
+                                   "sceneId": None, "voiceSequence": [_vs_sec_entry]},
+                          "hardwareOnline": False, "securityBlocked": True,
+                          "securityRule": _sr.rule_id, "securitySeverity": _sr.severity,
+                          "message": "\u5b89\u5168\u62a4\u680f\u5df2\u62e6\u622a"}
+            else:
+
+                # 保存用户消息
+
+                conn.execute("INSERT INTO chat_history(user_id,role,content,scene_id) VALUES('u001','user',?,?)", (content, None))
+
+                # RAG 场景匹配
+
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+                from rag.rag_service import SimpleRAG
+
+                from scenes.scene_config import get_scene_id_by_name, SCENE_META
+
+                rag = SimpleRAG()
+
+                scene_match = rag.search_scene(content)
+
+                reply = ""
+
+                scene_id = None
+
+                if scene_match and scene_match.get("scene_id"):
+
+                    sid = scene_match["scene_id"]
+
+                    # 激活场景
+
+                    conn.execute("UPDATE scenes SET is_active=0")
+
+                    conn.execute("UPDATE scenes SET is_active=1, updated_at=datetime('now') WHERE id=?", (sid,))
+
+                    actions = conn.execute("SELECT device_id,is_on,primary_value FROM scene_actions WHERE scene_id=? ORDER BY sort_order", (sid,)).fetchall()
+
+                    for dev_id, is_on, pv in actions:
+
+                        conn.execute("UPDATE devices SET is_on=?, updated_at=datetime('now') WHERE id=?", (1 if is_on else 0, dev_id))
+
+                        if pv is not None:
+
+                            conn.execute("UPDATE devices SET primary_value=?, updated_at=datetime('now') WHERE id=?", (pv, dev_id))
+
+                        conn.execute("INSERT INTO device_operations(device_id,action,params_json,source,scene_id) VALUES(?,?,?,?,?)",
+
+                                    (dev_id, "scene_toggle", json.dumps({"isOn": bool(is_on), "primaryValue": pv}), "remote", sid))
+
+                    # ★ 调用真实硬件执行场景
+                    hw_chat_results = hw_scene_execute([(dev_id, is_on, pv) for dev_id, is_on, pv in actions])
+                    hw_chat_fail = sum(1 for hr in hw_chat_results if not hr["success"])
+                    hw_chat_ok = any(hr["success"] for hr in hw_chat_results)
+
+                    sname = SCENE_META.get(sid, {}).get("name", sid)
+                    if hw_chat_fail == 0:
+                        reply = f"已切换到「{sname}」模式，控制 {len(actions)} 台设备"
+                    elif hw_chat_ok:
+                        reply = f"已切换到「{sname}」模式，{hw_chat_fail}台设备调用失败"
+                    else:
+                        reply = f"「{sname}」模式调用失败"
+
+                    scene_id = sid
+
+                else:
+                    # call gateway /api/chat/send for unified processing
+                    try:
+                        _gw_body = json.dumps({"messages": [{"role": "user", "content": content}]}, ensure_ascii=False).encode()
+                        _gw_req = Request("http://127.0.0.1:8080/api/chat/send", data=_gw_body,
+                                         headers={"Content-Type": "application/json"}, method="POST")
+                        with urlopen(_gw_req, timeout=30) as _gw_r:
+                            _gw_resp = json.loads(_gw_r.read().decode())
+                        _gw_data = _gw_resp.get("data", _gw_resp)
+                        reply = _gw_data.get("reply", "gateway no response")
+                        hw_online = _gw_data.get("hardwareOnline", True)
+                        _vs_seq = _gw_data.get("voiceSequence", [])
+                        scene_id = _gw_data.get("sceneId", None)
+                        log(f"[CHAT-GW] gateway ok: {reply[:40]}...")
+                    except Exception as _e:
+                        reply = f"gateway call failed: {_e}"
+                        hw_online = False
+                        _vs_seq = []
+                        log(f"[CHAT-GW] failed: {_e}")
+                    conn.execute("INSERT INTO chat_history(user_id,role,content,scene_id) VALUES(?,?,?,?)", ("u001","assistant",reply, scene_id))
+                    conn.commit()
+                chat_msg = "" if hw_online else "device call failed"
+                result = {"msgId": msg_id, "success": True, "data": {"reply": reply, "sceneId": scene_id, "voiceSequence": _vs_seq},
+                         "hardwareOnline": hw_online, "message": chat_msg}
 
 
 
