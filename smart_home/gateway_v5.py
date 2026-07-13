@@ -70,7 +70,8 @@ try:
         hw_toggle, hw_control, hw_sensor_read, hw_scene_execute,
         hw_all_status, hw_living_status, hw_kitchen_status,
         hw_bathroom_status, hw_bedroom_status,
-        _DEVICE_NAMES as _HW_DEV_NAMES
+        _DEVICE_NAMES as _HW_DEV_NAMES,
+        get_auth_status, verify_door_password_api,
     )
     _HW_OK = True
 except ImportError:
@@ -85,6 +86,8 @@ except ImportError:
     hw_bathroom_status = lambda *a, **kw: {"success": False, "data": {}, "error": "硬件模块未加载"}
     hw_bedroom_status = lambda *a, **kw: {"success": False, "data": {}, "error": "硬件模块未加载"}
     _HW_DEV_NAMES = {}
+    get_auth_status = lambda: {"enable_auth": False, "door_password_required": False, "shared_key_set": False}
+    verify_door_password_api = lambda p=None: (True, None)
 
 # ===== 设备定义 (只保留真实硬件) =====
 # 每个设备必须对应一块真实板子，离线=关+没有
@@ -210,6 +213,25 @@ def _security_block_reply(result):
         "securityRule": result.rule_id,
         "securitySeverity": result.severity
     }
+
+
+def _log_security_auth(rule_id, input_text, reason, source="api"):
+    """记录鉴权/密码类安全事件到数据库"""
+    try:
+        conn = _db()
+        conn.execute("""CREATE TABLE IF NOT EXISTS security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id TEXT NOT NULL, severity TEXT NOT NULL,
+            category TEXT NOT NULL, input_text TEXT NOT NULL,
+            matched_text TEXT NOT NULL, reason TEXT NOT NULL,
+            source TEXT DEFAULT 'chat', blocked INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now')))""")
+        conn.execute("INSERT INTO security_events(rule_id,severity,category,input_text,matched_text,reason,source,blocked) VALUES(?,?,?,?,?,?,?,?)",
+                     (rule_id, "High", "auth", input_text[:500], "", reason[:200], source, 1))
+        conn.commit(); conn.close()
+        log(f"[AUTH-SEC] rule={rule_id} reason={reason[:80]}")
+    except Exception as e:
+        log(f"[AUTH-SEC] log error: {e}")
 
 
 # ===== 真实硬件轮询 =====
@@ -709,6 +731,8 @@ class H(BaseHTTPRequestHandler):
                 self._j(200, self._security_events())
             elif p == "/api/security/stats":
                 self._j(200, self._security_stats())
+            elif p == "/api/security/auth-status":
+                self._j(200, self._auth_status())
             # TTS语音输出代理
             elif p == "/api/tts/config":
                 self._proxy_get("http://127.0.0.1:8081/tts/config")
@@ -738,6 +762,8 @@ class H(BaseHTTPRequestHandler):
                 self._j(200, self._voice_input(body))
             elif p == "/api/door/control":
                 self._j(200, self._door_control(body))
+            elif p == "/api/security/door-password-verify":
+                self._j(200, self._door_password_verify(body))
             elif p == "/api/user/profile":
                 self._j(200, self._update_user(body))
             elif p == "/api/rag/search":
@@ -1137,6 +1163,7 @@ class H(BaseHTTPRequestHandler):
     # ===== 设备控制 =====
     def _toggle_device(self, device_id, body):
         is_on = bool(body.get("isOn", False))
+        door_password = body.get("doorPassword") or body.get("password")
         # 安全护栏: 设备操作频率检查
         _dev_rate = _shield.check_device_rate(device_id, "device_toggle")
         if _dev_rate.blocked:
@@ -1152,7 +1179,14 @@ class H(BaseHTTPRequestHandler):
                 return {"success": False, "device": {"id": device_id, "online": False},
                         "securityBlocked": True, "securityRule": _ar.rule_id,
                         "securitySeverity": _ar.severity, "message": _ar.reason}
-        hw_result = hw_toggle(device_id, is_on)
+        # 门禁密码预检
+        if device_id == "door_01" and is_on:
+            verified, err = verify_door_password_api(door_password)
+            if not verified:
+                _log_security_auth("door_password_fail", f"door toggle {device_id}", err or "密码错误")
+                return {"success": False, "device": {"id": device_id, "online": False},
+                        "authFailed": True, "message": f"门禁密码校验失败: {err}"}
+        hw_result = hw_toggle(device_id, is_on, door_password=door_password)
         hw_ok = hw_result["success"]
         dev_name = _DEVICE_NAMES.get(device_id, device_id)
 
@@ -1186,7 +1220,15 @@ class H(BaseHTTPRequestHandler):
     def _control_device(self, device_id, body):
         action = body.get("action", "")
         ps = body.get("params", {})
-        hw_result = hw_control(device_id, action, ps)
+        door_password = body.get("doorPassword") or body.get("password")
+        # 门禁密码预检
+        if device_id == "door_01":
+            verified, err = verify_door_password_api(door_password)
+            if not verified:
+                _log_security_auth("door_password_fail", f"door control {device_id}", err or "密码错误")
+                return {"success": False, "device": {"id": device_id, "online": False},
+                        "authFailed": True, "message": f"门禁密码校验失败: {err}"}
+        hw_result = hw_control(device_id, action, ps, door_password=door_password)
         hw_ok = hw_result["success"]
         dev_name = _DEVICE_NAMES.get(device_id, device_id)
 
@@ -1227,6 +1269,7 @@ class H(BaseHTTPRequestHandler):
 
     def _door_control(self, body):
         action = body.get("action", "query")
+        door_password = body.get("password") or body.get("doorPassword")
         # 安全护栏: 门禁频率检查
         if action == "open":
             _dr = _shield.check_door_rate()
@@ -1235,10 +1278,18 @@ class H(BaseHTTPRequestHandler):
                 return {"success": False, "state": "blocked", "hardwareOnline": False,
                         "securityBlocked": True, "securityRule": _dr.rule_id, "securitySeverity": _dr.severity,
                         "message": _dr.reason}
+        # 门禁密码校验
+        if action in ("open", "close"):
+            verified, err = verify_door_password_api(door_password)
+            if not verified:
+                _log_security_auth("door_password_fail", f"door {action}", err or "密码错误")
+                return {"success": False, "state": "auth_failed", "hardwareOnline": False,
+                        "authFailed": True, "message": f"门禁密码校验失败: {err}",
+                        "passwordRequired": True, "passwordVerified": False}
         if action == "open":
-            hw_result = hw_toggle("door_01", True)
+            hw_result = hw_toggle("door_01", True, door_password=door_password)
         elif action == "close":
-            hw_result = hw_toggle("door_01", False)
+            hw_result = hw_toggle("door_01", False, door_password=door_password)
         else:
             hw_result = hw_living_status("door")
         hw_ok = hw_result.get("success", False)
@@ -1312,6 +1363,32 @@ class H(BaseHTTPRequestHandler):
         conn.close()
         return {"today": total_today, "total": total_all, "bySeverity": by_severity,
                 "byCategory": by_category, "byRule": by_rule, "shieldInfo": _shield.get_stats()}
+
+    def _auth_status(self):
+        """返回当前鉴权配置状态"""
+        auth_info = get_auth_status()
+        return {
+            "enableAuth": auth_info.get("enable_auth", False),
+            "doorPasswordRequired": auth_info.get("door_password_required", False),
+            "sharedKeySet": auth_info.get("shared_key_set", False),
+            "authAlgorithm": "CRC32+nonce",
+            "doorPasswordAlgorithm": "pbkdf2_sha256",
+            "note": "enable_auth=true 时中控发送带签名命令; door_password_required=true 时门禁操作需密码"
+        }
+
+    def _door_password_verify(self, body):
+        """门禁密码校验接口"""
+        password = body.get("password", "")
+        if not password:
+            return {"verified": False, "passwordRequired": True,
+                    "message": "门禁密码不能为空"}
+        verified, err = verify_door_password_api(password)
+        if verified:
+            return {"verified": True, "passwordRequired": True, "message": "密码校验通过"}
+        else:
+            _log_security_auth("door_password_fail", "door-password-verify API", err or "密码错误", source="api")
+            return {"verified": False, "passwordRequired": True,
+                    "message": f"密码校验失败: {err}", "authFailed": True}
 
     # ===== AI 对话 =====
     def _chat(self, body):
@@ -1387,6 +1464,17 @@ class H(BaseHTTPRequestHandler):
             return None
 
         dev_name = _DEVICE_NAMES.get(dev_id, dev_id)
+
+        # 门禁操作需密码，AI对话中无法直接输入密码，提示用户
+        if dev_id == "door_01" and is_on:
+            auth_info = get_auth_status()
+            if auth_info.get("door_password_required"):
+                reply = f"[操作结果] 门禁操作需要密码验证\n[提示] 请通过门禁控制接口输入密码后操作"
+                _tts_speak("门禁操作需要密码验证，请通过门禁控制接口操作")
+                return {"reply": reply, "role": "assistant",
+                        "voiceSequence": [_vs_entry("门禁操作需要密码验证")],
+                        "authRequired": True, "passwordRequired": True}
+
         hw_result = hw_toggle(dev_id, is_on)
         hw_ok = hw_result["success"]
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-硬件控制桥接模块 v2 · 纯标准库实现
+硬件控制桥接模块 v3 · 纯标准库实现
 将智慧家居设备ID映射到 central_controller.py 的真实硬件调用
 
-v2 变更:
-  - 新增 hw_living_status / hw_kitchen_status / hw_bathroom_status / hw_bedroom_status
-  - 每次调用只尝试一次，失败不重试
-  - 返回 {success, data, error}
-  - 设备离线时静默返回失败
+v3 变更:
+  - 集成边缘端鉴权: auth_key/enable_auth 自动附加签名
+  - 集成门禁密码校验: door 操作需先验证密码
+  - 集成中控限频: enforce_rate_limit 保护舵机/电机/风扇/空调
+  - 鉴权失败/限频触发记录到安全日志
 """
 from __future__ import annotations
 import json
@@ -28,6 +28,9 @@ try:
         bathroom_status, bathroom_set_light, bathroom_set_fan,
         bedroom_status, bedroom_set_light, bedroom_set_curtain, bedroom_curtain_action,
         all_status,
+        # v3: 鉴权与安全
+        auth_enabled, auth_key, verify_door_password, door_password_required,
+        enforce_rate_limit, maybe_security_alarm,
     )
     _CONFIG = load_config(str(_CONNECT_DIR / "devices.json"))
     _HW_AVAILABLE = True
@@ -38,6 +41,12 @@ except Exception as _e:
     bathroom_status = bathroom_set_light = bathroom_set_fan = None
     bedroom_status = bedroom_set_light = bedroom_set_curtain = bedroom_curtain_action = None
     all_status = None
+    auth_enabled = lambda c: False
+    auth_key = lambda c: b""
+    verify_door_password = lambda c, p=None: False
+    door_password_required = lambda c: False
+    enforce_rate_limit = lambda c, k: None
+    maybe_security_alarm = lambda c, t, r: None
 
 _TIMEOUT = 3.0
 
@@ -51,6 +60,20 @@ _DEVICE_NAMES = {
     "nfc_01": "NFC门禁", "voice_01": "语音中控", "radar_01": "毫米波雷达",
 }
 
+# 限频动作映射: device_id -> rate_limit action_key
+_RATE_LIMIT_MAP = {
+    "door_01": "living_room.door",
+    "ac_01": "living_room.ac",
+    "alarm_01": "living_room.beep",
+    "light_01": "living_room.light",
+    "light_05": "living_room.light",
+    "light_02": "kitchen.light",
+    "light_04": "bathroom.light",
+    "fan_02": "bathroom.fan",
+    "light_03": "bedroom.light",
+    "curtain_01": "bedroom.curtain",
+}
+
 
 def _dev_name(device_id):
     return _DEVICE_NAMES.get(device_id, device_id)
@@ -62,6 +85,38 @@ def _hw_ok(data=None):
 
 def _hw_fail(error):
     return {"success": False, "data": {}, "error": str(error)}
+
+
+def _hw_auth_fail(error):
+    """鉴权/安全类失败，带 authFailed 标记"""
+    return {"success": False, "data": {}, "error": str(error), "authFailed": True}
+
+
+def _enforce_rate(device_id):
+    """执行限频检查，超限抛 ValueError"""
+    action_key = _RATE_LIMIT_MAP.get(device_id)
+    if action_key:
+        enforce_rate_limit(_CONFIG, action_key)
+
+
+def get_auth_status():
+    """返回当前鉴权配置状态"""
+    return {
+        "enable_auth": auth_enabled(_CONFIG),
+        "door_password_required": door_password_required(_CONFIG),
+        "shared_key_set": bool(_CONFIG.get("security", {}).get("shared_key", "")),
+    }
+
+
+def verify_door_password_api(password=None):
+    """API 层门禁密码校验，返回 (verified, error_msg)"""
+    if not door_password_required(_CONFIG):
+        return True, None
+    try:
+        result = verify_door_password(_CONFIG, password)
+        return result, None
+    except ValueError as e:
+        return False, str(e)
 
 
 # ===== 区域状态查询 =====
@@ -116,12 +171,23 @@ def hw_bedroom_status():
 
 
 # ===== 开关设备 =====
-def hw_toggle(device_id, is_on):
-    """开关设备，返回 {success, data, error}"""
+def hw_toggle(device_id, is_on, door_password=None):
+    """开关设备，返回 {success, data, error}
+    door_password: 门禁操作时需传入密码
+    """
     if not _HW_AVAILABLE:
         return _hw_fail("硬件模块未加载")
 
     try:
+        # 门禁: 先校验密码
+        if device_id == "door_01":
+            verified, err = verify_door_password_api(door_password)
+            if not verified:
+                return _hw_auth_fail(f"门禁密码校验失败: {err}")
+
+        # 限频检查
+        _enforce_rate(device_id)
+
         if device_id == "light_01" or device_id == "light_05":
             action = "on" if is_on else "off"
             r = living_text(_CONFIG, "light", action, _TIMEOUT)
@@ -134,7 +200,7 @@ def hw_toggle(device_id, is_on):
 
         elif device_id == "door_01":
             action = "open" if is_on else "close"
-            r = living_door(_CONFIG, action, _TIMEOUT)
+            r = living_door(_CONFIG, action, _TIMEOUT, password=door_password)
             return _hw_ok(r)
 
         elif device_id == "alarm_01":
@@ -172,17 +238,41 @@ def hw_toggle(device_id, is_on):
         else:
             return _hw_ok({"note": "虚拟设备，无硬件控制"})
 
+    except ValueError as e:
+        # 限频/密码/鉴权类错误
+        err_str = str(e)
+        if _HW_AVAILABLE:
+            try:
+                maybe_security_alarm(_CONFIG, _TIMEOUT, e)
+            except Exception:
+                pass
+        if "rate limit" in err_str.lower():
+            return _hw_auth_fail(f"操作限频保护: {err_str}")
+        if "password" in err_str.lower():
+            return _hw_auth_fail(f"门禁密码校验失败: {err_str}")
+        return _hw_fail(e)
     except Exception as e:
         return _hw_fail(e)
 
 
 # ===== 参数控制 =====
-def hw_control(device_id, action, params):
-    """控制设备参数，返回 {success, data, error}"""
+def hw_control(device_id, action, params, door_password=None):
+    """控制设备参数，返回 {success, data, error}
+    door_password: 门禁操作时需传入密码
+    """
     if not _HW_AVAILABLE:
         return _hw_fail("硬件模块未加载")
 
     try:
+        # 门禁: 先校验密码
+        if device_id == "door_01":
+            verified, err = verify_door_password_api(door_password)
+            if not verified:
+                return _hw_auth_fail(f"门禁密码校验失败: {err}")
+
+        # 限频检查
+        _enforce_rate(device_id)
+
         if device_id == "ac_01":
             r = living_text(_CONFIG, "ac", "on", _TIMEOUT)
             return _hw_ok(r)
@@ -248,6 +338,18 @@ def hw_control(device_id, action, params):
         else:
             return _hw_ok({"note": "无硬件控制映射"})
 
+    except ValueError as e:
+        err_str = str(e)
+        if _HW_AVAILABLE:
+            try:
+                maybe_security_alarm(_CONFIG, _TIMEOUT, e)
+            except Exception:
+                pass
+        if "rate limit" in err_str.lower():
+            return _hw_auth_fail(f"操作限频保护: {err_str}")
+        if "password" in err_str.lower():
+            return _hw_auth_fail(f"门禁密码校验失败: {err_str}")
+        return _hw_fail(e)
     except Exception as e:
         return _hw_fail(e)
 

@@ -2,7 +2,8 @@
   "living_room": {
     "name": "living-room-hi3861",
     "ip": "192.168.1.62",
-    "port": 8000
+    "port": 8000,
+    "ac_codebook": "ac_ir_codes.json"
   },
   "kitchen": {
     "name": "kitchen-h3863",
@@ -26,5 +27,68 @@
   "defaults": {
     "timeout_seconds": 3.0,
     "monitor_interval_seconds": 1.0
+  },
+  "safety": {
+    "state_file": ".central_controller_state.json",
+    "rate_limits_ms": {
+      "living_room.door": 3000,
+      "living_room.ac": 2000,
+      "living_room.beep": 1000,
+      "living_room.light": 500,
+      "kitchen.light": 500,
+      "bathroom.light": 500,
+      "bathroom.fan": 1000,
+      "bedroom.light": 500,
+      "bedroom.curtain": 3000
+    },
+    "note": "中控侧动作限频，防止连续点击或脚本循环导致舵机、电机、风扇、红外空调被高频调用。"
+  },
+  "automation": {
+    "interval_seconds": 5.0,
+    "kitchen_alarm_buzzer": {
+      "enabled": false,
+      "clear_on_recovery": true,
+      "note": "开启后厨房烟雾/过温报警会联动客厅蜂鸣器。"
+    },
+    "living_temp_ac": {
+      "enabled": false,
+      "cool_on_temp_c": 30,
+      "cool_off_temp_c": 27,
+      "turn_off_below_threshold": false,
+      "cool_profile": "COOL_26_AUTO",
+      "note": "开启后客厅温度过高会联动空调制冷；默认不自动关机，避免频繁开关。"
+    },
+    "living_humidity_dry": {
+      "enabled": false,
+      "dry_on_humi_pct": 75,
+      "dry_off_humi_pct": 65,
+      "turn_off_below_threshold": false,
+      "dry_profile": "DRY_26_AUTO",
+      "note": "开启后客厅湿度过高会联动空调除湿；默认不自动关机。"
+    },
+    "security_alarm_buzzer": {
+      "enabled": false,
+      "trigger_keywords": [
+        "password",
+        "rate limit",
+        "auth",
+        "invalid"
+      ],
+      "note": "开启后，中控发现错误密码、限频触发或鉴权类错误时，可联动客厅蜂鸣器报警；别人绕过中控直连边缘端的非法包仍由边缘端拒绝并串口记录。"
+    }
+  },
+  "security": {
+    "enable_auth": false,
+    "shared_key": "A9_EDGE_DEMO_KEY",
+    "door_password": {
+      "require_password": true,
+      "algorithm": "pbkdf2_sha256",
+      "iterations": 120000,
+      "salt": "A9_LIVING_DOOR_DEMO_SALT_V1",
+      "hash": "f316320257dd40e0ffd97f50642fc5c67511ef8c071b8625b3aa0294531566aa",
+      "password_env": "A9_DOOR_PASSWORD",
+      "note": "演示门禁密码当前沿用客厅原始交接信息中的 8888888867；正式展示前建议用 central_controller.py security hash-door-password 重新生成。"
+    },
+    "note": "四个边缘端固件都支持鉴权并完成联调后，再开启 enable_auth=true；强制模式需同步把固件 EDGE_AUTH_REQUIRED 改为 1。"
   }
 }
