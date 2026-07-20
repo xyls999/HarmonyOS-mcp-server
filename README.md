@@ -5,6 +5,17 @@
  <a><img src='https://img.shields.io/badge/python-3.14-blue'></a>
 </div>
 
+## A9 单仓库目录
+
+本仓库同时保存移动端、中控端和 D6 现场后端源码：
+
+- `frontend/main/`：OpenHarmony 横屏中控前端，来源于 `Harmon_LandscapeControl_OpenHarmony` 当前工作区。
+- `frontend/move/`：OpenHarmony 移动端前端，来源于 `Harmon` 当前工作区。
+- `backend/d6-smart-home/`：从 D6 设备 `/data/A9/smart_home` 拉取的后端源码快照。
+- `smart_home/`：仓库原有的后端实现，保留用于历史兼容和版本对照。
+
+构建产物、语音缓存、数据库、日志、设备密钥和真实环境变量不会提交。部署时请从 `.env.example` 创建本地配置，并通过环境变量设置 `DEEPSEEK_API_KEY`、`A9_EDGE_SHARED_KEY`、`A9_DOOR_PASSWORD` 和 `A9_AI_DOOR_PASSWORD`。不要把真实值写回仓库。
+
 <div align="center">
     <img style="max-width: 500px; width: 60%;" width="1111" alt="image" src="https://github.com/user-attachments/assets/7c2e6879-f583-48d7-b467-c4c6d99c5fab" />
 </div>

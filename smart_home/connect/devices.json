@@ -79,15 +79,15 @@
   },
   "security": {
     "enable_auth": false,
-    "shared_key": "A9_EDGE_DEMO_KEY",
+    "shared_key": "",
     "door_password": {
       "require_password": true,
       "algorithm": "pbkdf2_sha256",
       "iterations": 120000,
-      "salt": "A9_LIVING_DOOR_DEMO_SALT_V1",
-      "hash": "f316320257dd40e0ffd97f50642fc5c67511ef8c071b8625b3aa0294531566aa",
+      "salt": "<GENERATE_UNIQUE_SALT>",
+      "hash": "<GENERATE_PBKDF2_SHA256_HASH>",
       "password_env": "A9_DOOR_PASSWORD",
-      "note": "演示门禁密码当前沿用客厅原始交接信息中的 8888888867；正式展示前建议用 central_controller.py security hash-door-password 重新生成。"
+      "note": "部署前必须通过 central_controller.py security hash-door-password 生成独立密码哈希。"
     },
     "note": "四个边缘端固件都支持鉴权并完成联调后，再开启 enable_auth=true；强制模式需同步把固件 EDGE_AUTH_REQUIRED 改为 1。"
   }

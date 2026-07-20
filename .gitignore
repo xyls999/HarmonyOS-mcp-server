@@ -5,24 +5,63 @@ build/
 dist/
 wheels/
 *.egg-info
+**/build/
+**/.hvigor/
+**/.idea/
+**/.artifacts/
+**/.worktrees/
+**/.preview/
+**/.openharmony-signing/
+**/.codex-backups/
+**/.appanalyzer/
+**/oh_modules/
+**/node_modules/
 
 # Virtual environments
 .venv
 
 # Project specific files
-*.png
 window_dump.xml
 output.mov
 config.yaml
 test.py
 tmp.json
 *.log
+*.hap
+*.hsp
+*.app
+*.pid
+*.lock
+*.wav
+*.mp3
 
 # Environment / secrets
 .deepseek_env
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+keys/
 # Smart home runtime files
 *.db
+*.sqlite
+*.sqlite3
 *.mp3
 tts_cache/
 __pycache__/
+project_context.json
+custom_led_devices.json
+offline_model.json
+voice_control.json
+voice_bridge_status.json
+backend/d6-smart-home/connect/.central_controller_state.json
+backend/d6-smart-home/connect/devices.local.json
+
+# Local UI screenshots and manual QA captures; packaged resources under src/ remain tracked.
+frontend/main/*.png
+frontend/main/*.jpg
+frontend/main/*.jpeg
+frontend/move/*.png
+frontend/move/*.jpg
+frontend/move/*.jpeg

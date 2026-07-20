@@ -1,0 +1,24 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "智慧家居控制中心"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "智慧家居应用"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "智慧家居"
+    },
+    {
+      "name": "microphone_permission_reason",
+      "value": "用于将语音指令识别为文字并发送给智能助手"
+    },
+    {
+      "name": "camera_permission_reason",
+      "value": "用于拍摄人脸照片并完成门禁识别或人脸录入"
+    }
+  ]
+}

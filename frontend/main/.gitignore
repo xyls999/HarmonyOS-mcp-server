@@ -1,0 +1,41 @@
+/node_modules
+/oh_modules
+/local.properties
+/.idea
+**/build
+/.hvigor
+.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
+/work
+
+# Local signing and developer credentials
+/.openharmony-signing
+/build-profile.json5
+*.p12
+*.cer
+*.pem
+*.p7b
+*.key
+.env
+.env.*
+
+# Device/runtime state and local backups
+*.db
+*.db-shm
+*.db-wal
+*.log
+__pycache__/
+*.pyc
+/tests/*.png
+/.worktrees/
+/.codex-backups
+
+# Legacy local gateway copies contain machine-local provider credentials.
+# The active D6 gateway is versioned separately from this frontend repository.
+/run_gateway.sh
+/smart_home_gateway.py
+/smart_home_gateway_v2.py

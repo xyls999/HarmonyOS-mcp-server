@@ -68,7 +68,7 @@ def auth_enabled(config):
 
 
 def auth_key(config):
-    return str(config.get("security", {}).get("shared_key", "A9_EDGE_DEMO_KEY")).encode(
+    return str(config.get("security", {}).get("shared_key", "")).encode(
         "utf-8"
     )
 

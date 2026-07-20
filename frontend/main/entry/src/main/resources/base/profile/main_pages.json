@@ -1,0 +1,9 @@
+{
+  "src": [
+    "pages/Index",
+    "pages/AddDevicePage",
+    "pages/detail/DeviceDetailPage",
+    "pages/detail/SensorDetailPage",
+    "pages/detail/CameraDetailPage"
+  ]
+}
