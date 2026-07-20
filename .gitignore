@@ -57,6 +57,7 @@ voice_control.json
 voice_bridge_status.json
 backend/d6-smart-home/connect/.central_controller_state.json
 backend/d6-smart-home/connect/devices.local.json
+_local_device_raw_backup/
 
 # Local UI screenshots and manual QA captures; packaged resources under src/ remain tracked.
 frontend/main/*.png
